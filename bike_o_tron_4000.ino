@@ -6,7 +6,7 @@
 int redLED = 10;
 int greenLED = 9;
 
-int tachPin = 2;
+int tachPin = 7;
 int modePin = 3;
 
 // Run Modes
@@ -318,7 +318,7 @@ void recordProgress(unsigned long sampleIndex)
 {
    byte sampleDelta = totalTach - lastSampleTach;
    lastSampleTach = totalTach;
-   const unsigned long sampleAddr = currentStartAddr+sampleIndexl;
+   const unsigned long sampleAddr = currentStartAddr+sampleIndex;
    if( sampleAddr < currentEndAddr ) {
      flash.writeByte(sampleAddr, sampleDelta);
    }
