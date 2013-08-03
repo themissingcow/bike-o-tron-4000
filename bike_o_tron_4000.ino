@@ -6,8 +6,8 @@
 int redLED = 10;
 int greenLED = 9;
 
-int tachPin = 7;
-int modePin = 3;
+int tachPin = 3;
+int modePin = 7;
 
 // Run Modes
 
@@ -59,12 +59,7 @@ unsigned long currentEndAddr = 0x00;
 
 unsigned int journeyBlockCount = 24;
 
-// First 48 bytes reserved for mapping tables
-unsigned long k_a_end = 0x00;
-unsigned long k_b_end = 0x04;
-unsigned long k_c_end = 0x08;
-unsigned long k_d_end = 0x0c;
-unsigned long k_x_end = 0x10;
+// First block (4096 bytes) reserved
 
 // Memory Indexes of journey starts, we use 24x4k blocks per journey
 unsigned long k_a_startAddr = 0x00000 + 4096;
@@ -75,31 +70,21 @@ unsigned long k_x_startAddr = k_d_startAddr + journeyBlockCount * 4096;
 
 
 void setup()
-{
-  Serial.begin( 9600 );
-  
+{  
   pinMode( redLED, OUTPUT );
   pinMode( greenLED, OUTPUT ); 
   
   pinMode( tachPin, INPUT );
-  attachInterrupt(0, tach_interrupt, RISING);
+  attachInterrupt(1, tach_interrupt, RISING);
 
   pinMode( modePin, INPUT );
-  detachInterrupt(1);
   
-  if (flash.initialize())
-  {
-    Serial.println("Init OK!");
-  } else {
-    Serial.println("Init FAIL!");
-  }
+  flash.initialize();
 }
 
 
 void tach_interrupt()
 {
-  // We'll need to look at debouncing when we
-  // have the real wheel hardware
    tachHigh = true;
 }
 
@@ -154,7 +139,7 @@ void loop_setup()
   
   // 10Hz setup loop
   if( ( loopTime - lastRunLoopTime ) < 100 ) { return; }
-
+  
   if( digitalRead(modePin) )
   {
     ++buttonHighCount;
@@ -189,8 +174,6 @@ void loop_setup()
   // After 4 revolutions, start the journey
   if( totalTach > 4 )
   {
-     Serial.print( "Staring Journey" );
-
      // Store the current start address of the journey
      if      ( journeyIndex == 0 ) { currentStartAddr = k_a_startAddr; }
      else if ( journeyIndex == 1 ) { currentStartAddr = k_b_startAddr; }
@@ -201,11 +184,15 @@ void loop_setup()
      {
         eraseJourney( currentStartAddr );
      }
-     else
-     {  
-        // read journey end addr (long) start at 0
-        currentEndAddr = currentStartAddr + (4096 *journeyBlockCount);
+     else if( runMode == kMERGE )
+     {
+        // erase our placeholder memory
+        eraseJourney( k_x_startAddr );
      }
+     
+     // calculate journey end addr (long) start at 0
+     currentEndAddr = currentStartAddr + (4096 * journeyBlockCount);
+
      reset_counters();
      journeyStarted = true;
   }
@@ -214,33 +201,11 @@ void loop_setup()
 }
 
 
-void eraseJourney( unsigned long addr )
-{
-  for( unsigned int i=0; i<journeyBlockCount; ++i)
-  {
-     flash.blockErase4K( addr+(4096*i) );
-  }
-}
-
-void reset_counters()
-{
-    totalTach = 0;
-    expectedTach = 0;
-    journeyStartTime = loopTime;
-    buttonHighCount = 0;
-}
-
-
 void loop_journey() 
 {
   if( ( loopTime - lastRunLoopTime ) < updateInterval ) { return; }
     
-  // The Logic
-  //
-  // At each sample interval, we compare expectedTachs to totalTacks
-  // and map the delta to the color range of the output LED
   updateExpected();
-  
   reportTachState( expectedInterpolatedTach - (totalTach + tachOffset) );
   
   lastRunLoopTime = loopTime;
@@ -250,44 +215,66 @@ void loop_journey()
 bool ledOn = false;
 void loop_log()
 {
-  if(ledOn && (( loopTime - lastLogLoopTime ) > 100 ))
+  if( tachHigh )
   {
-      analogWrite(redLED, 0);  
+    analogWrite(redLED, 255);
+    if( runMode == kMERGE )
+    {
+      analogWrite(greenLED, 255);
+    }
+    ledOn = true;
   }
   
+  if(ledOn && (( loopTime - lastLogLoopTime ) > 100 ))
+  {
+      analogWrite(redLED, 0); 
+      analogWrite(greenLED, 0);
+      ledOn = false;
+  }
   
+
   if( (loopTime - lastLogLoopTime) > logInterval )
   {
     lastLogLoopTime = loopTime;
+    
     recordProgress(sampleIndex);
      ++sampleIndex;
+     
+    // Handle user interaction
 
     if( digitalRead(modePin) )
     {
       ++buttonHighCount;
+      
+      // If we've held the button down for long enough, go back to log mode
+      
       if( buttonHighCount > 1 )
       {
-         // store the end address
-         const unsigned long endAddr = currentStartAddr + sampleIndex;
-         flash.writeBytes( journeyIndex*4, &endAddr, 4 );
-         journeyStarted = false;
-         reset_counters();
+        // if we're in merge mode, we need to copy the data back
+        if( runMode == kMERGE )
+        {
+           eraseJourney( currentStartAddr );
+           copyJourney( k_x_startAddr, currentStartAddr );
+        }
+        
+        journeyStarted = false;
+        reset_counters();
+        runMode = kRUN;
       }
     }
     else
     {
       buttonHighCount = 0;
     }
-    analogWrite(redLED, 255);
-    ledOn = true;
   }
  
 }
 
+// \}
+
 
 unsigned long lastSampleIndex = -1;
 unsigned long nextTach;
-
 
 // Calculates the expected number of tacks at this interval
 void updateExpected()
@@ -310,7 +297,7 @@ void updateExpected()
       }
    }   
 
-   expectedInterpolatedTach = ( expectedTach * (1.0f - sampleFraction) ) + ( nextTach * sampleFraction );   
+   expectedInterpolatedTach = ( expectedTach * ( 1.0f - sampleFraction ) ) + ( nextTach * sampleFraction );   
 }
 
 
@@ -318,12 +305,26 @@ void recordProgress(unsigned long sampleIndex)
 {
    byte sampleDelta = totalTach - lastSampleTach;
    lastSampleTach = totalTach;
-   const unsigned long sampleAddr = currentStartAddr+sampleIndex;
-   if( sampleAddr < currentEndAddr ) {
-     flash.writeByte(sampleAddr, sampleDelta);
+   
+   unsigned long sampleAddr = currentStartAddr + sampleIndex;
+   
+   if( sampleAddr > currentEndAddr ) { return; }
+
+   if( runMode == kMERGE )
+   {
+      byte existingDelta = flash.readByte(sampleAddr);
+      sampleDelta = ( sampleDelta + existingDelta ) / 2;
+      // Make sure we write into our tmp buffer too
+      sampleAddr = k_x_startAddr + sampleIndex;
    }
+      
+   flash.writeByte(sampleAddr, sampleDelta);
 }
 
+
+
+// \name State Reporting
+// \{
 
 int flashCount = 0;
 byte ledState = 0;
@@ -385,8 +386,44 @@ void reportTachState( int delta )
       greenLED, 
       constrain( greenState, 0, 255 )
     );
-  
 }
 
+// \}
+
+
+// \name FLASH Utility
+// \{
+
+void eraseJourney( unsigned long addr )
+{
+  for( unsigned int i=0; i<journeyBlockCount; ++i)
+  {
+     flash.blockErase4K( addr+(4096*i) );
+  }
+}
+
+
+void copyJourney( unsigned long fromAddr, unsigned long toAddr )
+{
+  unsigned long buffer;
+  unsigned long byteCount = (journeyBlockCount * 4096) / 4;
+  for( unsigned long i=0; i<byteCount; ++i ) 
+  {
+     flash.readBytes( fromAddr+(i*4), &buffer, 4 );
+     flash.writeBytes( toAddr+(i*4), &buffer, 4 );
+  }
+}
+
+// \}
+
+
+
+void reset_counters()
+{
+    totalTach = 0;
+    expectedTach = 0;
+    journeyStartTime = loopTime;
+    buttonHighCount = 0;
+}
 
 
